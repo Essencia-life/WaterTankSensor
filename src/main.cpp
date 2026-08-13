@@ -1,12 +1,13 @@
 // FIX 1: Der Modus MUSS ganz oben definiert werden, damit alle nachfolgenden #ifdef-Blöcke synchron greifen.
 // Hier den gewünschten Modus einkommentieren:
-//#define IS_RECEIVER
-#define IS_SENDER
+#define IS_RECEIVER
+// #define IS_SENDER
 #define HELTEC_NO_DISPLAY_INSTANCE
 #include <Arduino.h>
 #include <heltec_unofficial.h> // Ersetzt Arduino.h, bringt u8g2 und radio mit
 #include <U8g2lib.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include <time.h>
 
 // OPEN might-ToDos:
@@ -86,6 +87,13 @@ struct LoRaPayload {
 // siehe u8g2.setFont(u8g2_font_6x10_tf); weiter unten im text
 #ifdef IS_RECEIVER
 // --- EMPFÄNGER CONFIG & VARIABLEN (Muss VOR setup() stehen) ---
+#ifndef SERVER_HOST
+#define SERVER_HOST "example.com"
+#endif
+#ifndef SERVER_API_KEY
+#define SERVER_API_KEY "replace-me"
+#endif
+
 const char* wifi_ssid = "STARLINK";
 unsigned long last_rx_millis = 0;
 volatile bool rxFlag = false;
@@ -106,6 +114,24 @@ void rxIsr() {
 }
 #endif
 
+String getUtcTimestamp() {
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  if (gmtime_r(&now, &timeinfo) == nullptr) {
+    return "1970-01-01T00:00:00Z";
+  }
+
+  char ts[32];
+  snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+           timeinfo.tm_year + 1900,
+           timeinfo.tm_mon + 1,
+           timeinfo.tm_mday,
+           timeinfo.tm_hour,
+           timeinfo.tm_min,
+           timeinfo.tm_sec);
+  return String(ts);
+}
+
 // Hilfsfunktion zur Textübersetzung der Stati
 String getStatusText(uint8_t state) {
   switch(state) {
@@ -116,6 +142,63 @@ String getStatusText(uint8_t state) {
     case STATE_OUT_OF_RANGE:  return "Err (Out of Range)";
     default:                  return "Starting...";
   }
+}
+
+String buildTankIngestPayload(uint8_t sensorState, float waterLevelPercent, float levelCm, int signalDbm) {
+  char payload[256];
+  snprintf(payload, sizeof(payload),
+           "{\"deviceId\":\"essencia-water-tank-01\",\"timestamp\":\"%s\",\"state\":%u,\"waterLevelPercent\":%.1f,\"levelCm\":%.1f,\"signalDbm\":%d}",
+           getUtcTimestamp().c_str(),
+           (unsigned int)sensorState,
+           waterLevelPercent,
+           levelCm,
+           signalDbm);
+  return String(payload);
+}
+
+bool pushTankReadingToServer(uint8_t sensorState, float waterLevelPercent, float levelCm, int signalDbm) {
+  if (strlen(SERVER_HOST) == 0 || strlen(SERVER_API_KEY) == 0) {
+    Serial.println("Server push skipped: SERVER_HOST / SERVER_API_KEY not configured.");
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Server push skipped: WiFi disconnected.");
+    return false;
+  }
+
+  String payload = buildTankIngestPayload(sensorState, waterLevelPercent, levelCm, signalDbm);
+  String url = String("https://") + String(SERVER_HOST) + "/api/ingest/lora-tank";
+
+  Serial.printf("Posting to %s\n", url.c_str());
+  Serial.printf("Payload: %s\n", payload.c_str());
+
+  WiFiClientSecure client;
+  HTTPClient http;
+  client.setInsecure();
+
+  if (!http.begin(client, url)) {
+    Serial.println("HTTP begin failed for server push.");
+    return false;
+  }
+
+  http.setTimeout(15000);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-api-key", SERVER_API_KEY);
+
+  int httpCode = http.POST(payload);
+  String response = http.getString();
+  http.end();
+
+  if (httpCode >= 200 && httpCode < 300) {
+    Serial.printf("Server push OK: HTTP %d\n", httpCode);
+    Serial.println(response);
+    return true;
+  }
+
+  Serial.printf("Server push failed: HTTP %d\n", httpCode);
+  Serial.println(response);
+  return false;
 }
 
 #endif
@@ -491,6 +574,11 @@ void loop() {
       Serial.printf("\nreceived payload int %i", rx_sensor_state);
       Serial.printf("\nreceived payload float %f", rx_water_level);
       Serial.printf("\nso it is rx_status_text = %s", rx_status_text);
+
+      const int signalDbm = radio.getRSSI();
+      const float levelCm = distance_filtered;
+      const float levelPercent = (rx_water_level > 0.0f) ? rx_water_level : 0.0f;
+      pushTankReadingToServer(rx_sensor_state, levelPercent, levelCm, signalDbm);
     }
     
     // Radio wieder in den Empfangsmodus versetzen
