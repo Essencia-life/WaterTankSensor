@@ -646,7 +646,8 @@ void loop() {
       const float levelPercent = (rx_water_level > 0.0f) ? rx_water_level : 0.0f;
 
       // Nur alle 5 Minuten an den Server senden, aber das Display weiterhin jede 30s aktualisieren.
-      if (millis() - last_server_push_millis >= server_push_interval) {
+      if (last_server_push_millis == 0 ||
+          millis() - last_server_push_millis >= server_push_interval) {
         last_server_push_millis = millis();
         pushTankReadingToServer(rx_sensor_state, levelPercent, levelCm, signalDbm);
       }
