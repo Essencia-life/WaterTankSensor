@@ -1,7 +1,3 @@
-// FIX 1: Der Modus MUSS ganz oben definiert werden, damit alle nachfolgenden #ifdef-Blöcke synchron greifen.
-// Hier den gewünschten Modus einkommentieren:
-#define IS_RECEIVER
-// #define IS_SENDER
 #define HELTEC_NO_DISPLAY_INSTANCE
 #include <Arduino.h>
 #include <heltec_unofficial.h> // Ersetzt Arduino.h, bringt u8g2 und radio mit
@@ -98,10 +94,25 @@ const char* wifi_ssid = "STARLINK";
 unsigned long last_rx_millis = 0;
 unsigned long last_server_push_millis = 0;
 const unsigned long server_push_interval = 3UL * 60UL * 1000UL; // Nur alle 3 Minuten an den Server senden
+const unsigned long wifi_reconnect_interval = 10UL * 1000UL;
+const unsigned long upload_retry_interval = 10UL * 1000UL;
+const size_t upload_queue_capacity = 64;
+unsigned long last_wifi_attempt_millis = 0;
+unsigned long last_time_sync_attempt_millis = 0;
+unsigned long last_upload_attempt_millis = 0;
 volatile bool rxFlag = false;
 uint8_t rx_sensor_state = STATE_INIT;
 float rx_water_level = -1;
 String rx_status_text = "Waiting...";
+bool wifi_and_time_state_is_ok = false;
+
+struct PendingUpload {
+  String payload;
+};
+
+PendingUpload upload_queue[upload_queue_capacity];
+size_t upload_queue_head = 0;
+size_t upload_queue_count = 0;
 
 // FIX 2: Vorwärtsdeklaration für den Compiler und IRAM_ATTR für die ISR auf ESP32
 #if defined(ESP32)
@@ -158,7 +169,7 @@ String buildTankIngestPayload(uint8_t sensorState, float waterLevelPercent, floa
   return String(payload);
 }
 
-bool pushTankReadingToServer(uint8_t sensorState, float waterLevelPercent, float levelCm, int signalDbm) {
+bool postPayloadToServer(const String& payload) {
   if (strlen(SERVER_HOST) == 0 || strlen(SERVER_API_KEY) == 0) {
     Serial.println("Server push skipped: SERVER_HOST / SERVER_API_KEY not configured.");
     return false;
@@ -169,7 +180,6 @@ bool pushTankReadingToServer(uint8_t sensorState, float waterLevelPercent, float
     return false;
   }
 
-  String payload = buildTankIngestPayload(sensorState, waterLevelPercent, levelCm, signalDbm);
   String url = String("https://") + String(SERVER_HOST) + "/api/ingest/lora-tank";
 
   Serial.printf("Posting to %s\n", url.c_str());
@@ -203,6 +213,83 @@ bool pushTankReadingToServer(uint8_t sensorState, float waterLevelPercent, float
   return false;
 }
 
+bool enqueueUpload(const String& payload) {
+  if (upload_queue_count >= upload_queue_capacity) {
+    Serial.println("Upload queue full; dropping oldest upload.");
+    upload_queue[upload_queue_head].payload = "";
+    upload_queue_head = (upload_queue_head + 1) % upload_queue_capacity;
+    upload_queue_count--;
+  }
+
+  size_t tail = (upload_queue_head + upload_queue_count) % upload_queue_capacity;
+  upload_queue[tail].payload = payload;
+  upload_queue_count++;
+  Serial.printf("Upload queued; %u pending.\n", (unsigned int)upload_queue_count);
+  return true;
+}
+
+bool flushUploadQueue() {
+  if (upload_queue_count == 0 || WiFi.status() != WL_CONNECTED) {
+    return upload_queue_count == 0;
+  }
+
+  unsigned long now = millis();
+  if (now - last_upload_attempt_millis < upload_retry_interval) {
+    return false;
+  }
+
+  while (upload_queue_count > 0 && WiFi.status() == WL_CONNECTED) {
+    last_upload_attempt_millis = millis();
+    String& payload = upload_queue[upload_queue_head].payload;
+    if (!postPayloadToServer(payload)) {
+      return false;
+    }
+
+    payload = "";
+    upload_queue_head = (upload_queue_head + 1) % upload_queue_capacity;
+    upload_queue_count--;
+    Serial.printf("Upload acknowledged; %u pending.\n", (unsigned int)upload_queue_count);
+  }
+
+  return upload_queue_count == 0;
+}
+
+bool pushTankReadingToServer(uint8_t sensorState, float waterLevelPercent, float levelCm, int signalDbm) {
+  String payload = buildTankIngestPayload(sensorState, waterLevelPercent, levelCm, signalDbm);
+  enqueueUpload(payload);
+  return flushUploadQueue();
+}
+
+void maintainWifiConnection() {
+  unsigned long now = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    wifi_and_time_state_is_ok = false;
+    if (now - last_wifi_attempt_millis >= wifi_reconnect_interval) {
+      last_wifi_attempt_millis = now;
+      Serial.println("WiFi disconnected; trying to reconnect.");
+      WiFi.disconnect();
+      WiFi.begin(wifi_ssid);
+    }
+    return;
+  }
+
+  if (!wifi_and_time_state_is_ok &&
+      now - last_time_sync_attempt_millis >= wifi_reconnect_interval) {
+    last_time_sync_attempt_millis = now;
+    configTime(0, 3600, "pool.ntp.org");
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 100)) {
+      wifi_and_time_state_is_ok = true;
+      Serial.println("WiFi connected and time synchronized.");
+    } else {
+      Serial.println("WiFi connected, but time synchronization is still pending.");
+    }
+  }
+
+  flushUploadQueue();
+}
+
 #endif
 
 // Konstanten der LORA- (Long Range Radio Communication ESP)
@@ -215,9 +302,6 @@ const unsigned long lora_send_interval = 30000; // Sendeintervall in Millisekund
 
 
 bool lora_state_is_ok = true;  // Lora state (sender and receiver)
-#ifdef IS_RECEIVER
-bool wifi_and_time_state_is_ok = false;  // wifi state and time from online-server (only receiver-module)
-#endif
 String SensorTextPrint = "";    // Variable für Textausgabe deklariert
 String SensorStatus = "";       // Variable für SensorStatus deklariert
 SensorState currentSensorState = STATE_INIT;  // Sensorstatus auf Init-State schicken
@@ -295,30 +379,8 @@ void setup() {
 
   // und Wifi versuchen zu aktivieren:
   WiFi.begin(wifi_ssid);
-  int wifi_timeout_ctr = 0;
-  // Versuche WLAN-Verbindung (max. 10 Sekunden)
-  while (WiFi.status() != WL_CONNECTED && wifi_timeout_ctr < 20) {
-    delay(500);
-    wifi_timeout_ctr++;
-  }
-
-  // Wenn WLAN steht, hole die NTP-Zeit
-  if (WiFi.status() == WL_CONNECTED) {
-    configTime(0, 3600, "pool.ntp.org");
-    
-    struct tm timeinfo;
-    int time_timeout_ctr = 0;
-    // Versuche Zeitsynchronisation (max. 5 Sekunden)
-    while (!getLocalTime(&timeinfo) && time_timeout_ctr < 10) {
-      delay(500);
-      time_timeout_ctr++;
-    }
-
-    // Wenn auch die Zeit erfolgreich geladen wurde
-    if (getLocalTime(&timeinfo)) {
-      wifi_and_time_state_is_ok = true; 
-    }
-  }
+  WiFi.setAutoReconnect(true);
+  last_wifi_attempt_millis = millis();
   #endif
 }
 
@@ -556,6 +618,8 @@ void loop() {
 
   #ifdef IS_RECEIVER
   // --- EMPFÄNGER LOOP (Nur Status & Waterlevel) ---
+  maintainWifiConnection();
+
   // 1. Prüfen, ob ein Paket über den Interrupt registriert wurde
   if (rxFlag) {
     rxFlag = false;
