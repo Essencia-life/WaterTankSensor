@@ -93,7 +93,7 @@ struct LoRaPayload {
 const char* wifi_ssid = "STARLINK";
 unsigned long last_rx_millis = 0;
 unsigned long last_server_push_millis = 0;
-const unsigned long server_push_interval = 3UL * 60UL * 1000UL; // Nur alle 3 Minuten an den Server senden
+const unsigned long server_push_interval = 5UL * 60UL * 1000UL; // Nur alle 5 Minuten an den Server senden
 const unsigned long wifi_reconnect_interval = 10UL * 1000UL;
 const unsigned long upload_retry_interval = 10UL * 1000UL;
 const size_t upload_queue_capacity = 64;
@@ -645,7 +645,7 @@ void loop() {
       const float levelCm = distance_filtered;
       const float levelPercent = (rx_water_level > 0.0f) ? rx_water_level : 0.0f;
 
-      // Nur alle 3 Minuten an den Server senden, aber das Display weiterhin jede 30s aktualisieren.
+      // Nur alle 5 Minuten an den Server senden, aber das Display weiterhin jede 30s aktualisieren.
       if (millis() - last_server_push_millis >= server_push_interval) {
         last_server_push_millis = millis();
         pushTankReadingToServer(rx_sensor_state, levelPercent, levelCm, signalDbm);
