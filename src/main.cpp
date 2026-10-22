@@ -93,7 +93,7 @@ struct LoRaPayload {
 const char* wifi_ssid = "STARLINK";
 unsigned long last_rx_millis = 0;
 unsigned long last_server_push_millis = 0;
-const unsigned long server_push_interval = 5UL * 60UL * 1000UL; // Nur alle 5 Minuten an den Server senden
+const unsigned long server_push_interval = 3UL * 60UL * 1000UL; // Nur alle 3 Minuten an den Server senden
 const unsigned long wifi_reconnect_interval = 10UL * 1000UL;
 const unsigned long upload_retry_interval = 10UL * 1000UL;
 const size_t upload_queue_capacity = 64;
@@ -157,15 +157,12 @@ String getStatusText(uint8_t state) {
   }
 }
 
-String buildTankIngestPayload(uint8_t sensorState, float waterLevelPercent, float levelCm, int signalDbm) {
-  char payload[256];
+String buildTankIngestPayload(float waterLevelPercent) {
+  char payload[128];
   snprintf(payload, sizeof(payload),
-           "{\"deviceId\":\"essencia-water-tank-01\",\"timestamp\":\"%s\",\"state\":%u,\"waterLevelPercent\":%.1f,\"levelCm\":%.1f,\"signalDbm\":%d}",
+           "{\"deviceId\":\"essencia-water-tank-01\",\"timestamp\":\"%s\",\"waterLevelPercent\":%.1f}",
            getUtcTimestamp().c_str(),
-           (unsigned int)sensorState,
-           waterLevelPercent,
-           levelCm,
-           signalDbm);
+           waterLevelPercent);
   return String(payload);
 }
 
@@ -254,8 +251,8 @@ bool flushUploadQueue() {
   return upload_queue_count == 0;
 }
 
-bool pushTankReadingToServer(uint8_t sensorState, float waterLevelPercent, float levelCm, int signalDbm) {
-  String payload = buildTankIngestPayload(sensorState, waterLevelPercent, levelCm, signalDbm);
+bool pushTankReadingToServer(float waterLevelPercent) {
+  String payload = buildTankIngestPayload(waterLevelPercent);
   enqueueUpload(payload);
   return flushUploadQueue();
 }
@@ -641,15 +638,17 @@ void loop() {
       Serial.printf("\nreceived payload float %f", rx_water_level);
       Serial.printf("\nso it is rx_status_text = %s", rx_status_text);
 
-      const int signalDbm = radio.getRSSI();
-      const float levelCm = distance_filtered;
-      const float levelPercent = (rx_water_level > 0.0f) ? rx_water_level : 0.0f;
+      // Nur der Wasserstand in Prozent geht an den Server, und nur bei gültiger Messung.
+      // Bei Sensorfehlern wird nichts gesendet (kein falscher 0%-Wert), damit ein
+      // "No data"-Alert im Monitoring den Ausfall erkennt.
+      const bool measurementIsValid = (rx_sensor_state == STATE_OK || rx_sensor_state == STATE_DEADZONE);
 
-      // Nur alle 5 Minuten an den Server senden, aber das Display weiterhin jede 30s aktualisieren.
-      if (last_server_push_millis == 0 ||
-          millis() - last_server_push_millis >= server_push_interval) {
+      // Nur alle 3 Minuten an den Server senden, aber das Display weiterhin jede 30s aktualisieren.
+      if (measurementIsValid &&
+          (last_server_push_millis == 0 ||
+           millis() - last_server_push_millis >= server_push_interval)) {
         last_server_push_millis = millis();
-        pushTankReadingToServer(rx_sensor_state, levelPercent, levelCm, signalDbm);
+        pushTankReadingToServer(rx_water_level);
       }
     }
     
