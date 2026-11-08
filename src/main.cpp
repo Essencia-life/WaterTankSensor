@@ -4,6 +4,7 @@
 #include <U8g2lib.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <LittleFS.h>
 #include <time.h>
 
 // OPEN might-ToDos:
@@ -145,6 +146,42 @@ String getUtcTimestamp() {
   return String(ts);
 }
 
+// Event log that survives reboots and power loss: LittleFS, /log.txt rotates to /log.old at 16 KB.
+// Only events are logged (state changes), never one line per loop, to spare the flash.
+// Send any character over the serial monitor to print the stored log.
+// shortcut: the time is 1970 until NTP syncs, "up" is the uptime in seconds; upgrade if that is not enough.
+void logEvent(const char* fmt, ...) {
+  char msg[160];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, args);
+  va_end(args);
+
+  char line[240];
+  snprintf(line, sizeof(line), "%s up=%lus %s\n", getUtcTimestamp().c_str(), millis() / 1000UL, msg);
+  Serial.print(line);
+
+  File f = LittleFS.open("/log.txt", "a");
+  if (!f) return;
+  f.print(line);
+  size_t size = f.size();
+  f.close();
+  if (size > 16384) {
+    LittleFS.remove("/log.old");
+    LittleFS.rename("/log.txt", "/log.old");
+  }
+}
+
+void printStoredLog() {
+  for (const char* name : {"/log.old", "/log.txt"}) {
+    File f = LittleFS.open(name, "r");
+    if (!f) continue;
+    while (f.available()) Serial.write(f.read());
+    f.close();
+  }
+  Serial.println("--- end of stored log ---");
+}
+
 // Hilfsfunktion zur Textübersetzung der Stati
 String getStatusText(uint8_t state) {
   switch(state) {
@@ -165,6 +202,8 @@ String buildTankIngestPayload(float waterLevelPercent) {
            waterLevelPercent);
   return String(payload);
 }
+
+bool server_push_failing = false;
 
 bool postPayloadToServer(const String& payload) {
   if (strlen(SERVER_HOST) == 0 || strlen(SERVER_API_KEY) == 0) {
@@ -202,17 +241,25 @@ bool postPayloadToServer(const String& payload) {
   if (httpCode >= 200 && httpCode < 300) {
     Serial.printf("Server push OK: HTTP %d\n", httpCode);
     Serial.println(response);
+    if (server_push_failing) {
+      server_push_failing = false;
+      logEvent("server push OK again (%u pending)", (unsigned int)upload_queue_count);
+    }
     return true;
   }
 
   Serial.printf("Server push failed: HTTP %d\n", httpCode);
   Serial.println(response);
+  if (!server_push_failing) {
+    server_push_failing = true;
+    logEvent("server push failed: HTTP %d (%u pending)", httpCode, (unsigned int)upload_queue_count);
+  }
   return false;
 }
 
 bool enqueueUpload(const String& payload) {
   if (upload_queue_count >= upload_queue_capacity) {
-    Serial.println("Upload queue full; dropping oldest upload.");
+    logEvent("upload queue full; dropping oldest upload");
     upload_queue[upload_queue_head].payload = "";
     upload_queue_head = (upload_queue_head + 1) % upload_queue_capacity;
     upload_queue_count--;
@@ -258,10 +305,15 @@ bool pushTankReadingToServer(float waterLevelPercent) {
 }
 
 void maintainWifiConnection() {
+  static bool wifi_down_logged = false;
   unsigned long now = millis();
 
   if (WiFi.status() != WL_CONNECTED) {
     wifi_and_time_state_is_ok = false;
+    if (!wifi_down_logged) {
+      wifi_down_logged = true;
+      logEvent("WiFi lost");
+    }
     if (now - last_wifi_attempt_millis >= wifi_reconnect_interval) {
       last_wifi_attempt_millis = now;
       Serial.println("WiFi disconnected; trying to reconnect.");
@@ -271,6 +323,11 @@ void maintainWifiConnection() {
     return;
   }
 
+  if (wifi_down_logged) {
+    wifi_down_logged = false;
+    logEvent("WiFi connected");
+  }
+
   if (!wifi_and_time_state_is_ok &&
       now - last_time_sync_attempt_millis >= wifi_reconnect_interval) {
     last_time_sync_attempt_millis = now;
@@ -278,7 +335,7 @@ void maintainWifiConnection() {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 100)) {
       wifi_and_time_state_is_ok = true;
-      Serial.println("WiFi connected and time synchronized.");
+      logEvent("time synchronized");
     } else {
       Serial.println("WiFi connected, but time synchronization is still pending.");
     }
@@ -334,6 +391,11 @@ void setup() {
   
   // Serial USB serial output baud rate
   Serial.begin(115200);
+
+  #ifdef IS_RECEIVER
+  LittleFS.begin(true); // true = format on first start
+  logEvent("boot, reset reason %d (1 power, 3 software, 4 crash, 5-7 watchdog, 9 brownout)", (int)esp_reset_reason());
+  #endif
   
   // ATTENTION // ACHTUNG
   heltec_setup(); // ACHTUNG; NUR AKTIVIEREN, WENN ANTENNEN AN MODUL GEKNÜPFT SIND. SONST DROHT SCHADEN AM CHIP.
@@ -617,10 +679,32 @@ void loop() {
   // --- EMPFÄNGER LOOP (Nur Status & Waterlevel) ---
   maintainWifiConnection();
 
+  if (Serial.available()) {
+    while (Serial.available()) Serial.read();
+    printStoredLog();
+  }
+
+  // Der Funk-Timeout muss hier stehen, nicht im rxFlag-Zweig: dort läuft er nur, wenn gerade ein Paket kam.
+  static bool lora_silence_logged = false;
+  if (last_rx_millis > 0 && (millis() - last_rx_millis) > 600000) {
+    if (!lora_silence_logged) {
+      lora_silence_logged = true;
+      logEvent("no LoRa packet for 10 min");
+    }
+    lora_state_is_ok = false;
+    rx_status_text = "??";
+    rx_water_level = -1;
+  }
+
   // 1. Prüfen, ob ein Paket über den Interrupt registriert wurde
   if (rxFlag) {
     rxFlag = false;
     last_rx_millis = millis();
+    if (lora_silence_logged) {
+      lora_silence_logged = false;
+      lora_state_is_ok = true;
+      logEvent("LoRa packets received again");
+    }
     Serial.println("Packet detected!");
 
     LoRaPayload dataIn;
@@ -634,6 +718,11 @@ void loop() {
     if (state == RADIOLIB_ERR_NONE) {
       rx_sensor_state = rx_sensor_state;
       rx_status_text  = getStatusText(rx_sensor_state);
+      static uint8_t last_logged_sensor_state = 255;
+      if (rx_sensor_state != last_logged_sensor_state) {
+        last_logged_sensor_state = rx_sensor_state;
+        logEvent("sensor state %d (%s)", (int)rx_sensor_state, rx_status_text.c_str());
+      }
       Serial.printf("\nreceived payload int %i", rx_sensor_state);
       Serial.printf("\nreceived payload float %f", rx_water_level);
       Serial.printf("\nso it is rx_status_text = %s", rx_status_text);
@@ -654,12 +743,6 @@ void loop() {
     
     // Radio wieder in den Empfangsmodus versetzen
     radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF);
-
-    if (last_rx_millis > 0 && (millis() - last_rx_millis) > 600000) {
-    lora_state_is_ok = false;
-    rx_status_text = "??";
-    rx_water_level = -1; // Sorgt bei deiner Display-Logik für "-- %"
-}
   }
 
   // noch zu integrieren. Zeitstempel (aus Internet?)

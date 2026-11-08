@@ -156,6 +156,17 @@ Frequency, spreading factor, coding rate and sync word must be identical on both
 | `upload_queue_capacity` | 64 | readings kept while offline |
 | `wifi_ssid` | `STARLINK` | WiFi network of the receiver |
 
+## Device log
+
+The receiver keeps an event log in its flash memory, so it survives a reboot or power loss (the last ~16-32 KB, about the last few hundred events). Only events are stored, not every loop:
+
+- boot, with the reset reason (1 power on, 3 software, 4 crash, 5-7 watchdog, 9 brownout)
+- WiFi lost / connected, time synchronized
+- server push failing (with HTTP code and queue size) / working again, upload queue full
+- sensor status changes (for example Drift or Timeout, during which nothing is sent) and "no LoRa packet for 10 min"
+
+To read it, connect the receiver to a computer, open the serial monitor (`pio device monitor -b 115200`) and send any character (type a letter and press Enter). The log is printed, oldest first. The time is `1970-...` until the clock is synchronized, `up=` is the uptime in seconds.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
