@@ -203,7 +203,7 @@ String buildTankIngestPayload(float waterLevelPercent) {
   return String(payload);
 }
 
-bool server_push_failing = false;
+int8_t server_push_status = -1; // -1 no push yet, 0 last push failed, 1 last push OK
 
 bool postPayloadToServer(const String& payload) {
   if (strlen(SERVER_HOST) == 0 || strlen(SERVER_API_KEY) == 0) {
@@ -241,19 +241,19 @@ bool postPayloadToServer(const String& payload) {
   if (httpCode >= 200 && httpCode < 300) {
     Serial.printf("Server push OK: HTTP %d\n", httpCode);
     Serial.println(response);
-    if (server_push_failing) {
-      server_push_failing = false;
+    if (server_push_status == 0) {
       logEvent("server push OK again (%u pending)", (unsigned int)upload_queue_count);
     }
+    server_push_status = 1;
     return true;
   }
 
   Serial.printf("Server push failed: HTTP %d\n", httpCode);
   Serial.println(response);
-  if (!server_push_failing) {
-    server_push_failing = true;
+  if (server_push_status != 0) {
     logEvent("server push failed: HTTP %d (%u pending)", httpCode, (unsigned int)upload_queue_count);
   }
+  server_push_status = 0;
   return false;
 }
 
@@ -776,11 +776,15 @@ void loop() {
     
     // Status-Ausgabe (Info-Zeile 2)
     u8g2.setCursor(0, 37);
-    u8g2.print("LORA: ");
-    u8g2.print(lora_state_is_ok? "OK": "Err");
-    u8g2.setCursor(66, 37);
-    u8g2.print("WiFi: ");
-    u8g2.print(wifi_and_time_state_is_ok ? "OK" : "Err");
+    // Three cells of 7 characters (6 px each) fit the 128 px line, so errors are shown as "NO".
+    u8g2.print("LoRa:");
+    u8g2.print(lora_state_is_ok ? "OK" : "NO");
+    u8g2.setCursor(43, 37);
+    u8g2.print("WiFi:");
+    u8g2.print(wifi_and_time_state_is_ok ? "OK" : "NO");
+    u8g2.setCursor(86, 37);
+    u8g2.print("Srv:");
+    u8g2.print(server_push_status < 0 ? "--" : (server_push_status ? "OK" : "NO"));
 
     u8g2.drawHLine(0, 40, 128);
 

@@ -138,7 +138,7 @@ If the board is not found or the upload cannot connect, put it into download mod
 The serial monitor (115200 baud) shows the log. After flashing:
 
 - **Sender display:** distance in cm, level in percent, sensor status and `LORA: OK`.
-- **Receiver display:** `Watertank Level (R)`, the sensor status from the last packet, level and `WiFi: OK` once WiFi is connected and the time is synchronized. The first packet arrives within 30 s.
+- **Receiver display:** `Watertank Level (R)`, the sensor status from the last packet, level and a status row `LoRa:OK WiFi:OK Srv:OK` (`NO` = problem; `Srv:--` = no upload attempted yet, `Srv:OK` = last upload to the DataHub succeeded, `Srv:NO` = it failed). The first packet arrives within 30 s.
 - Start the sender first or the receiver first, the order does not matter.
 
 Frequency, spreading factor, coding rate and sync word must be identical on both boards. They are, as long as both are built from the same source. When you change them, flash both boards.
@@ -172,8 +172,9 @@ To read it, connect the receiver to a computer, open the serial monitor (`pio de
 | Symptom | Likely cause |
 | --- | --- |
 | No serial port, upload cannot connect | charge-only cable, missing driver, or board needs download mode (see above) |
-| Receiver shows `??` | no LoRa packets for 10 minutes: sender off, antennas missing or too far apart, sender shows `LORA: Err` |
-| Receiver shows `WiFi: Err` | network not reachable, or time not synchronized yet (NTP needs internet) |
+| Receiver shows `??` | no LoRa packets for 10 minutes: sender off, antennas missing or too far apart, sender shows `LORA: Err` (the sender display still says `Err`) |
+| Receiver shows `WiFi:NO` | network not reachable, or time not synchronized yet (NTP needs internet) |
+| Receiver shows `Srv:NO` | the last upload failed: DataHub or internet not reachable, see the device log for the HTTP code |
 | Serial log: `Server push failed: HTTP 401` | wrong `SERVER_API_KEY` |
 | Serial log: `Server push failed: HTTP 400` | the DataHub rejected the payload, check the DataHub logs |
 | Serial log: `Upload queue full; dropping oldest upload` | DataHub or WiFi was unreachable for more than about 3 hours |
