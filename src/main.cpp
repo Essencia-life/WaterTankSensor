@@ -362,6 +362,8 @@ SensorState currentSensorState = STATE_INIT;  // Sensorstatus auf Init-State sch
 float distance_filtered = 50.0;  // Globaler Filterwert, init-wert bei 50 cm damit keine 0Divisionen entstehen
 float watertank_level_percentage = -1;        // watertank_percentage (-1 init wert == eher unrealistisch bei normalem ablassen, weil das Rohr ja bei 0% ist)
 // change watertank level to float or sth. which is 45.3% .. because it is toggeling too much. and it makes too much of a difference on 100 steps.
+const unsigned int drift_max_cycles = 150; // ~2 s per loop, so ~5 min: a longer jump is a real level change, not a lid
+unsigned int drift_cycles = 0;  // consecutive cycles in the drift state
 bool is_first_run = true;       // Flag für Erstinitialisierung des Filters
 unsigned int err_info_ctr = 1;
 
@@ -511,17 +513,20 @@ void loop() {
     currentSensorState = STATE_OUT_OF_RANGE;
     SensorStatus = "ERR (> Max. Distance)";
     SensorTextPrint = "dist. > 150cm"; // SensorTextPrint = "dist. > int2str(distance_max_depth_watertank) cm".
-  } else if ( ( abs( distance-distance_filtered ) > 10 ) && (is_first_run == false) )
+  } else if ( ( abs( distance-distance_filtered ) > 10 ) && (is_first_run == false) && drift_cycles < drift_max_cycles )
     {
     // Rate-Filter for opening Lit (to have a look or sth.).
     // max accepted change 4cm / cycle
     // would it be better to filter this later? on collected data?
+    // The filter value is not updated here, so without drift_max_cycles the sensor stayed in this
+    // state until reboot whenever the water level really moved by more than 10 cm.
+    drift_cycles++;
     currentSensorState = STATE_DRIFT_ERROR;
     SensorStatus = "ERR (high Sens drift)";
-    SensorTextPrint = "Lit Opened? close & reboot";
+    SensorTextPrint = "Lit Opened? waits 5 min";
   } else if ( distance < distance_max_depth_watertank && distance > distance_deadzone ) // Also Sensor innerhalb der normalen, erwarteten Arbeitsbedingungen
     {
-    if ( currentSensorState == STATE_INIT ) 
+    if ( currentSensorState == STATE_INIT || drift_cycles >= drift_max_cycles ) 
     {// Lowpass-Filter (90% Altwert, 10% Neuwert)
     // erster Startup Filterwert direkt setzten (Init)
       distance_filtered = distance;
@@ -529,6 +534,7 @@ void loop() {
     } else {
       distance_filtered = ( (distance_filtered * 0.8) + (distance * 0.2) );
     }
+    drift_cycles = 0;
     currentSensorState = STATE_OK;
     SensorStatus = "OK";
     SensorTextPrint = String(distance_filtered) + " cm";

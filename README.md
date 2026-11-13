@@ -54,7 +54,7 @@ Sensor status values (sent as a number):
 | 0 | OK | valid measurement |
 | 1 | Timeout | no echo: object too far away, or sensor covered |
 | 2 | Dead zone | water very close to the sensor, still usable |
-| 3 | Drift error | jump of more than 10 cm between cycles (lid opened or closed, sensor moved) |
+| 3 | Drift error | jump of more than 10 cm against the filtered level (lid opened or closed, sensor moved). If it lasts more than ~5 minutes, the new level is accepted as real and the sensor returns to OK |
 | 4 | Init | just started, no valid measurement yet |
 | 5 | Out of range | water appears deeper than the tank (e.g. lid open) |
 
